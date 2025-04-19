@@ -4,6 +4,7 @@ namespace Moinul\LinkScanner;
 
 use Illuminate\Support\ServiceProvider;
 use Moinul\LinkScanner\Console\ScanLinks;
+use Moinul\LinkScanner\Services\LinkCrawler;
 
 class LinkScannerServiceProvider extends ServiceProvider
 {
@@ -46,6 +47,13 @@ class LinkScannerServiceProvider extends ServiceProvider
 
         $this->app->singleton('linkscanner', function ($app) {
             return new Services\LinkCrawler(
+                $app['config']->get('broken-links')
+            );
+        });
+
+        // Bind LinkCrawler with config
+        $this->app->bind(LinkCrawler::class, function ($app) {
+            return new LinkCrawler(
                 $app['config']->get('broken-links')
             );
         });

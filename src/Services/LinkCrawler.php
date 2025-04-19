@@ -6,12 +6,16 @@ use GuzzleHttp\Client;
 use GuzzleHttp\Promise\EachPromise;
 use Symfony\Component\DomCrawler\Crawler;
 use Moinul\LinkScanner\Models\BrokenLink;
+use Illuminate\Console\Command;
 
 class LinkCrawler
 {
     protected array $config;
     protected Client $client;
     protected array $seen = [];
+    protected ?Command $command = null;
+    protected int $totalLinks = 0;
+    protected int $checkedLinks = 0;
 
     public function __construct(array $config, ?Client $client = null)
     {
@@ -21,6 +25,12 @@ class LinkCrawler
             'headers'      => ['User-Agent' => $config['user_agent']],
             'http_errors'  => false,
         ]);
+    }
+
+    public function setCommand(Command $command): self
+    {
+        $this->command = $command;
+        return $this;
     }
 
     public function scan(string $startUrl = null): void
@@ -35,6 +45,18 @@ class LinkCrawler
             return;
         }
 
+        $this->totalLinks += count($urls);
+        
+        if ($this->command && $this->command->getOutput()->isVerbose()) {
+            $this->command->info(sprintf(
+                'Depth: %d, Processing %d URLs (Total: %d, Checked: %d)',
+                $depth,
+                count($urls),
+                $this->totalLinks,
+                $this->checkedLinks
+            ));
+        }
+
         $promises = [];
         foreach ($urls as $url) {
             if (isset($this->seen[$url])) {
@@ -42,7 +64,10 @@ class LinkCrawler
             }
             $this->seen[$url] = true;
             $promises[] = $this->client->getAsync($url)
-                ->then(fn($response) => $this->handleResponse($url, $response));
+                ->then(function($response) use ($url) {
+                    $this->checkedLinks++;
+                    return $this->handleResponse($url, $response);
+                });
         }
 
         $each = new EachPromise($promises, [
@@ -67,6 +92,16 @@ class LinkCrawler
     protected function handleResponse(string $url, $response): void
     {
         $status = $response->getStatusCode();
+        
+        if ($this->command && $this->command->getOutput()->isVerbose()) {
+            $message = sprintf('Checking %s - Status: %d', $url, $status);
+            if ($status >= 400) {
+                $this->command->error($message);
+            } else {
+                $this->command->line($message);
+            }
+        }
+
         if ($status >= 400) {
             BrokenLink::create([
                 'url'         => $url,
