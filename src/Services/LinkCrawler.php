@@ -3,7 +3,7 @@
 namespace Moinul\LinkScanner\Services;
 
 use GuzzleHttp\Client;
-use GuzzleHttp\Promise\EachPromise;
+use GuzzleHttp\Exception\RequestException;
 use Symfony\Component\DomCrawler\Crawler;
 use Moinul\LinkScanner\Models\BrokenLink;
 use Illuminate\Console\Command;
@@ -12,10 +12,7 @@ class LinkCrawler
 {
     protected array $config;
     protected Client $client;
-    protected array $seen = [];
     protected ?Command $command = null;
-    protected int $totalLinks = 0;
-    protected int $checkedLinks = 0;
 
     public function __construct(array $config, ?Client $client = null)
     {
@@ -24,6 +21,7 @@ class LinkCrawler
             'timeout'      => $config['timeout'],
             'headers'      => ['User-Agent' => $config['user_agent']],
             'http_errors'  => false,
+            'verify'       => false, // Skip SSL verification
         ]);
     }
 
@@ -33,97 +31,111 @@ class LinkCrawler
         return $this;
     }
 
-    public function scan(string $startUrl = null): void
+    public function scan(string $url = null): void
     {
-        $startUrl = $startUrl ?: $this->config['start_url'];
-        $this->crawl([$startUrl], 0);
+        $url = $url ?: $this->config['start_url'];
+        
+        try {
+            // Get the page content
+            $response = $this->client->get($url);
+            $html = (string) $response->getBody();
+            
+            // Parse all links
+            $crawler = new Crawler($html, $url);
+            $links = $crawler->filter('a')->each(function (Crawler $node) use ($url) {
+                $href = $node->attr('href') ?? '';
+                $text = trim($node->text());
+                
+                // Check for empty or hash-only links
+                if (empty($href) || $href === '#' || preg_match('/^#.+$/', $href)) {
+                    $this->logBrokenLink($href, 0, 'Empty or hash-only link', $text);
+                    return;
+                }
+                
+                try {
+                    // Convert relative to absolute URL
+                    $absoluteUrl = $this->makeAbsolute($href, $url);
+                    if (!$absoluteUrl) {
+                        $this->logBrokenLink($href, 0, 'Invalid URL format', $text);
+                        return;
+                    }
+                    
+                    // Check if URL is accessible
+                    $this->checkUrl($absoluteUrl, $text);
+                    
+                } catch (\Exception $e) {
+                    $this->logBrokenLink($href, 0, $e->getMessage(), $text);
+                }
+            });
+            
+            if ($this->command) {
+                $this->command->info('Scan completed.');
+            }
+            
+        } catch (\Exception $e) {
+            if ($this->command) {
+                $this->command->error('Failed to fetch page: ' . $e->getMessage());
+            }
+        }
     }
 
-    protected function crawl(array $urls, int $depth): void
+    protected function checkUrl(string $url, string $linkText): void
     {
-        if ($depth > $this->config['max_depth']) {
-            return;
+        if ($this->command && $this->command->getOutput()->isVerbose()) {
+            $this->command->line("Checking: $url");
         }
 
-        $this->totalLinks += count($urls);
-        
+        try {
+            $response = $this->client->get($url);
+            $status = $response->getStatusCode();
+            
+            if ($status >= 400) {
+                $this->logBrokenLink($url, $status, $response->getReasonPhrase(), $linkText);
+            }
+        } catch (RequestException $e) {
+            $status = $e->hasResponse() ? $e->getResponse()->getStatusCode() : 0;
+            $reason = $e->hasResponse() ? $e->getResponse()->getReasonPhrase() : $e->getMessage();
+            $this->logBrokenLink($url, $status, $reason, $linkText);
+        } catch (\Exception $e) {
+            $this->logBrokenLink($url, 0, $e->getMessage(), $linkText);
+        }
+    }
+
+    protected function makeAbsolute(string $href, string $baseUrl): ?string
+    {
+        // Handle mailto:, tel:, javascript: links
+        if (preg_match('/^(mailto:|tel:|javascript:)/', $href)) {
+            return null;
+        }
+
+        try {
+            return (string) \GuzzleHttp\Psr7\UriResolver::resolve(
+                new \GuzzleHttp\Psr7\Uri($baseUrl),
+                new \GuzzleHttp\Psr7\Uri($href)
+            );
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    protected function logBrokenLink(string $url, int $status, string $reason, string $linkText): void
+    {
         if ($this->command && $this->command->getOutput()->isVerbose()) {
-            $this->command->info(sprintf(
-                'Depth: %d, Processing %d URLs (Total: %d, Checked: %d)',
-                $depth,
-                count($urls),
-                $this->totalLinks,
-                $this->checkedLinks
+            $this->command->error(sprintf(
+                'Broken Link Found - URL: %s, Status: %d, Reason: %s, Text: %s',
+                $url,
+                $status,
+                $reason,
+                $linkText
             ));
         }
 
-        $promises = [];
-        foreach ($urls as $url) {
-            if (isset($this->seen[$url])) {
-                continue;
-            }
-            $this->seen[$url] = true;
-            $promises[] = $this->client->getAsync($url)
-                ->then(function($response) use ($url) {
-                    $this->checkedLinks++;
-                    return $this->handleResponse($url, $response);
-                });
-        }
-
-        $each = new EachPromise($promises, [
-            'concurrency' => $this->config['concurrency'],
+        BrokenLink::create([
+            'url'         => $url,
+            'status_code' => $status,
+            'reason'      => $reason,
+            'link_text'   => $linkText,
+            'checked_at'  => now(),
         ]);
-        $each->promise()->wait();
-
-        // collect new URLs
-        $newUrls = [];
-        foreach ($this->seen as $u => $_) {
-            if ($_ === true) {
-                $newUrls[] = $u;
-                $this->seen[$u] = false;
-            }
-        }
-
-        if ($newUrls) {
-            $this->crawl($newUrls, $depth + 1);
-        }
-    }
-
-    protected function handleResponse(string $url, $response): void
-    {
-        $status = $response->getStatusCode();
-        
-        if ($this->command && $this->command->getOutput()->isVerbose()) {
-            $message = sprintf('Checking %s - Status: %d', $url, $status);
-            if ($status >= 400) {
-                $this->command->error($message);
-            } else {
-                $this->command->line($message);
-            }
-        }
-
-        if ($status >= 400) {
-            BrokenLink::create([
-                'url'         => $url,
-                'status_code' => $status,
-                'reason'      => $response->getReasonPhrase(),
-                'checked_at'  => now(),
-            ]);
-            return;
-        }
-
-        $html = (string) $response->getBody();
-        $crawler = new Crawler($html);
-        $crawler->filter('a[href]')->each(function (Crawler $node) use (&$newUrls) {
-            $link = $node->attr('href');
-            $abs   = \GuzzleHttp\Psr7\UriResolver::resolve(
-                new \GuzzleHttp\Psr7\Uri($this->config['start_url']),
-                new \GuzzleHttp\Psr7\Uri($link)
-            );
-            $hostMatch = parse_url((string)$abs, PHP_URL_HOST) === parse_url($this->config['start_url'], PHP_URL_HOST);
-            if ($hostMatch) {
-                $newUrls[] = (string) $abs;
-            }
-        });
     }
 }

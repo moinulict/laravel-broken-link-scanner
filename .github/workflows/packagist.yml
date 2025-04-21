@@ -1,0 +1,19 @@
+name: Update Packagist
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - master
+      - main
+
+jobs:
+  packagist:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Packagist
+        run: |
+          curl -XPOST -H'content-type:application/json' \
+          'https://packagist.org/api/update-package?username=${{ secrets.PACKAGIST_USERNAME }}&apiToken=${{ secrets.PACKAGIST_TOKEN }}' \
+          -d'{"repository":{"url":"https://github.com/moinulict/laravel-broken-link-scanner"}}' 

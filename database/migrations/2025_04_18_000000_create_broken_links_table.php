@@ -13,6 +13,7 @@ class CreateBrokenLinksTable extends Migration
             $table->string('url');
             $table->integer('status_code');
             $table->string('reason')->nullable();
+            $table->text('link_text')->nullable();
             $table->timestamp('checked_at');
             $table->timestamps();
         });
