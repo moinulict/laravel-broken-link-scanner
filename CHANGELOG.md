@@ -2,6 +2,14 @@
 
 All notable changes to `laravel-broken-link-scanner` will be documented in this file.
 
+## 1.1.1 - 2024-03-XX
+
+### Changed
+- Updated dependencies for better Laravel 11 and PHP 8.4 support
+- Updated maatwebsite/excel to ^3.1.50
+- Added support for Symfony 7.0 components
+- Updated dev dependencies (testbench, phpunit, mockery)
+
 ## 1.1.0 - 2024-03-XX
 
 ### Added
