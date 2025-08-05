@@ -7,12 +7,16 @@ use GuzzleHttp\Exception\RequestException;
 use Symfony\Component\DomCrawler\Crawler;
 use Moinul\LinkScanner\Models\BrokenLink;
 use Illuminate\Console\Command;
+use Illuminate\Support\Str;
 
 class LinkCrawler
 {
     protected array $config;
     protected Client $client;
     protected ?Command $command = null;
+    protected array $visitedUrls = [];
+    protected string $baseDomain;
+    protected int $currentDepth = 0;
 
     public function __construct(array $config, ?Client $client = null)
     {
@@ -33,16 +37,54 @@ class LinkCrawler
 
     public function scan(string $url = null): void
     {
-        $url = $url ?: $this->config['start_url'];
-        
+        $startUrl = $url ?: $this->config['start_url'];
+        $this->baseDomain = parse_url($startUrl, PHP_URL_HOST);
+        $this->visitedUrls = [];
+        $this->currentDepth = 0;
+
+        $urlsToVisit = [$startUrl];
+
+        while (!empty($urlsToVisit) && $this->currentDepth < $this->config['max_depth']) {
+            $currentUrl = array_shift($urlsToVisit);
+            
+            if (in_array($currentUrl, $this->visitedUrls)) {
+                continue;
+            }
+
+            $this->visitedUrls[] = $currentUrl;
+            $newUrls = $this->crawlPage($currentUrl);
+            
+            // Add new URLs to the queue
+            foreach ($newUrls as $newUrl) {
+                if (!in_array($newUrl, $this->visitedUrls) && !in_array($newUrl, $urlsToVisit)) {
+                    $urlsToVisit[] = $newUrl;
+                }
+            }
+
+            $this->currentDepth++;
+        }
+
+        if ($this->command) {
+            $this->command->info('Scan completed. Total pages crawled: ' . count($this->visitedUrls));
+        }
+    }
+
+    protected function crawlPage(string $url): array
+    {
+        $newUrls = [];
+
         try {
+            if ($this->command) {
+                $this->command->info("Crawling page: $url");
+            }
+
             // Get the page content
             $response = $this->client->get($url);
             $html = (string) $response->getBody();
             
             // Parse all links
             $crawler = new Crawler($html, $url);
-            $links = $crawler->filter('a')->each(function (Crawler $node) use ($url) {
+            $crawler->filter('a')->each(function (Crawler $node) use ($url, &$newUrls) {
                 $href = $node->attr('href') ?? '';
                 $text = trim($node->text());
                 
@@ -63,20 +105,29 @@ class LinkCrawler
                     // Check if URL is accessible
                     $this->checkUrl($absoluteUrl, $text);
                     
+                    // If URL is from the same domain, add it to crawl queue
+                    if ($this->shouldCrawl($absoluteUrl)) {
+                        $newUrls[] = $absoluteUrl;
+                    }
+                    
                 } catch (\Exception $e) {
                     $this->logBrokenLink($href, 0, $e->getMessage(), $text);
                 }
             });
-            
-            if ($this->command) {
-                $this->command->info('Scan completed.');
-            }
             
         } catch (\Exception $e) {
             if ($this->command) {
                 $this->command->error('Failed to fetch page: ' . $e->getMessage());
             }
         }
+
+        return $newUrls;
+    }
+
+    protected function shouldCrawl(string $url): bool
+    {
+        $urlDomain = parse_url($url, PHP_URL_HOST);
+        return $urlDomain === $this->baseDomain;
     }
 
     protected function checkUrl(string $url, string $linkText): void
